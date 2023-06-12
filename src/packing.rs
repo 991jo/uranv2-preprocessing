@@ -45,7 +45,9 @@ pub fn save_lifetimes(lifetimes: &Vec<Lifetime>, filename: &Path) -> Result<(), 
         } else {
             writer.write_fmt(format_args!(
                 "{} {} {}\n",
-                index, lifetime.end, lifetime.start
+                index,
+                lifetime.end - 1,
+                lifetime.start
             ))?;
         }
     }
@@ -59,6 +61,7 @@ pub fn load_lifetimes(filename: &Path) -> Result<Vec<Lifetime>, LifetimeParsingE
     let mut lifetimes = Vec::<Lifetime>::new();
 
     for (linenr, line) in reader.lines().enumerate() {
+        // dbg!(linenr);
         let line = line.map_err(LifetimeParsingError::ReadError)?;
         let split = line.trim().split(" ");
 
@@ -73,7 +76,15 @@ pub fn load_lifetimes(filename: &Path) -> Result<Vec<Lifetime>, LifetimeParsingE
             LifetimeParsingError::ParsingError(format!("could not parse {end} as an integer"))
         })?;
 
-        let end: Level = if end > 0 { end as Level } else { Level::MAX };
+        // dbg!(end);
+
+        let end: Level = if end >= 0 {
+            (end + 1) as Level
+        } else {
+            Level::MAX
+        };
+
+        // dbg!(end);
 
         let start = split
             .next()
@@ -84,13 +95,18 @@ pub fn load_lifetimes(filename: &Path) -> Result<Vec<Lifetime>, LifetimeParsingE
             LifetimeParsingError::ParsingError(format!("could not parse {start} as an integer"))
         })?;
 
-        let start: Level = if start > 0 {
+        // dbg!(start);
+
+        let start: Level = if start >= 0 {
             start as Level
         } else {
             Level::MAX
         };
+        // dbg!(start);
 
-        lifetimes.push(Lifetime { start, end });
+        let lt = Lifetime { start, end };
+        // dbg!(linenr, lt);
+        lifetimes.push(lt);
     }
 
     Ok(lifetimes)
@@ -104,9 +120,10 @@ pub enum LifetimeParsingError {
 
 pub struct IterativeUnpacker<'a> {
     graph: &'a Graph<UranNode, UranEdge>,
-    edges_by_level: Vec<Vec<EdgeId>>,
+    edges_by_level: Vec<Vec<EdgeId>>, // the edges sorted into buckets corresponding to the minimum
+    // level of the two nodes they connect
     max_level: Level,
-    unpacked_edges: Vec<EdgeId>,
+    unpacked_edges: Vec<EdgeId>, //
     unpack_offsets: Vec<usize>,
 }
 
@@ -118,8 +135,8 @@ impl<'a> IterativeUnpacker<'a> {
             graph,
             edges_by_level: vec![Vec::new(); (max_level + 1) as usize],
             max_level,
-            unpacked_edges: vec![EdgeId::MAX; graph.edges.len()],
-            unpack_offsets: Vec::with_capacity((max_level + 2) as usize),
+            unpacked_edges: Vec::new(),
+            unpack_offsets: vec![0; (max_level + 1) as usize],
         };
 
         // assign the edges to their levels
@@ -167,12 +184,15 @@ impl<'a> IterativeUnpacker<'a> {
         }
     }
 
-    pub fn pack(&mut self) {
-        let lifetimes = vec![Lifetime::default(); self.graph.edges.len()];
+    pub fn repack(&mut self) -> Vec<Lifetime> {
+        // dbg!(self.unpack_offsets.clone());
+        // dbg!(self.unpacked_edges.clone());
+        let mut lifetimes = vec![Lifetime{start: u16::MAX, end: u16::MIN}; self.graph.edges.len()];
 
-        let mut neighbor_counter = vec![NeighborCounter::new(); self.graph.nodes.len()];
+        let mut edge_used = vec![false; self.graph.edges.len()];
+
+        // calculate the node that was contracted to create a shortcut.
         let mut contracted_node = vec![NodeId::MAX; self.graph.edges.len()];
-
         for edge in self.graph.edges.iter() {
             if edge.is_shortcut() {
                 contracted_node[edge.id as usize] = self.graph.edge(edge.bridge_a).dst;
@@ -180,18 +200,80 @@ impl<'a> IterativeUnpacker<'a> {
         }
 
         for level in (0..=self.max_level).rev() {
+            println!("working on level {level}");
+            let mut neighbor_counter = vec![EdgeNeighborCounter::new(); self.graph.nodes.len()];
             let level_offset = self.unpack_offsets[level as usize];
-            let used_edges = &self.graph.edges[..level_offset];
+            let used_edges = &self.unpacked_edges[..level_offset];
+            // dbg!(used_edges);
+            for edge_idx in used_edges.iter() {
+                let edge = &self.graph.edges[*edge_idx as usize];
 
-            // calculate the neighbor count of edge node
-            for counter in neighbor_counter.iter_mut() {
-                counter.clear();
+                neighbor_counter[edge.src as usize].add(*edge_idx, edge.dst);
+                neighbor_counter[edge.dst as usize].add(*edge_idx, edge.src);
+                edge_used[*edge_idx as usize] = true;
             }
-            for edge in used_edges.iter() {
-                neighbor_counter[edge.src as usize].add(edge.dst);
-                neighbor_counter[edge.dst as usize].add(edge.src);
+
+            // contract the edges
+            for level in 0..=self.max_level {
+                // println!("working on level {level} (inner loop)");
+                for edge_idx in self.edges_by_level[level as usize].iter() {
+                    let edge = &self.graph.edges[*edge_idx as usize];
+
+                    if !edge.is_shortcut() {
+                        continue;
+                    }
+
+                    if !(edge_used[edge.bridge_a as usize] && edge_used[edge.bridge_b as usize]) {
+                        continue;
+                    }
+
+                    let node = contracted_node[edge.id as usize];
+
+                    let neighbors = neighbor_counter[node as usize].count();
+
+                    if neighbors >= 3 {
+                        continue;
+                    }
+                    // dbg!(edge);
+
+                    // remove the old edges
+                    edge_used[edge.bridge_a as usize] = false;
+                    edge_used[edge.bridge_b as usize] = false;
+                    // println!("removing {} and {}", edge.bridge_a, edge.bridge_b);
+
+                    neighbor_counter[edge.src as usize].del(edge.bridge_a);
+                    neighbor_counter[edge.dst as usize].del(edge.bridge_b);
+                    neighbor_counter[node as usize].del(edge.bridge_a);
+                    neighbor_counter[node as usize].del(edge.bridge_b);
+
+                    // add the new edge
+                    edge_used[edge.id as usize] = true;
+                    neighbor_counter[edge.src as usize].add(edge.id, edge.dst);
+                    neighbor_counter[edge.dst as usize].add(edge.id, edge.src);
+                }
             }
+
+            for (index, used) in edge_used.iter().enumerate() {
+                if !used {
+                    continue;
+                }
+
+                let lifetime = &mut lifetimes[index as usize];
+
+                lifetime.start = lifetime.start.min(level);
+                lifetime.end = lifetime.end.max(level + 1);
+            }
+            // dbg!(lifetimes.clone());
         }
+
+        lifetimes
+    }
+}
+
+impl<'a> GraphPacker for IterativeUnpacker<'a> {
+    fn pack(&mut self) -> Vec<Lifetime> {
+        self.unpack();
+        self.repack()
     }
 }
 
@@ -266,7 +348,6 @@ impl NeighborCounter {
     }
 }
 
-#[derive(Debug, Default)]
 /// A counter that allows to track the amount of neighbors and the edge via
 /// which they are connected.
 ///
@@ -296,6 +377,7 @@ impl NeighborCounter {
 /// counter.add(4, 9001);
 /// assert!(counter.count() == 2);
 /// ```
+#[derive(Debug, Clone)]
 pub struct EdgeNeighborCounter {
     edges: SmallVec<[(EdgeId, NodeId); 4]>,
     counter: NeighborCounter,
@@ -361,5 +443,23 @@ impl EdgeNeighborCounter {
         }
 
         self.counter.count
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_lifetimes() {
+        let lifetime = Lifetime { start: 1, end: 5 };
+        assert!(lifetime.lives_at(1));
+        assert!(!lifetime.lives_at(0));
+        assert!(lifetime.lives_at(4));
+        assert!(!lifetime.lives_at(5));
+
+        let lifetime = Lifetime { start: 0, end: 179 };
+        assert!(lifetime.lives_at(0));
+        assert!(!lifetime.lives_at(200));
     }
 }

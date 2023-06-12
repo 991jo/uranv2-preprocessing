@@ -1,10 +1,10 @@
 use clap::Parser;
 use std::path::PathBuf;
+use std::process::exit;
 use std::time::Instant;
 use uranv2::graph::Level;
 use uranv2::query::NaiveQuery;
 use uranv2::utils::{load_graph, load_lifetimes};
-use std::process::exit;
 
 #[derive(Parser, Debug)]
 struct Arguments {
@@ -33,6 +33,16 @@ pub fn main() {
     println!("It took {} seconds to load the graph.", delta);
 
     let lifetimes = load_lifetimes(&args.lifetimes);
+
+    let mut counter = 0;
+    for lifetime in lifetimes.iter() {
+        if !lifetime.is_empty() {
+            counter += 1;
+            //dbg!(lifetime);
+        };
+    }
+
+    println!("{} edges with non-empty lifetimes.", counter);
 
     assert!(lifetimes.len() == graph.edges.len());
 
