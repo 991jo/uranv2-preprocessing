@@ -446,6 +446,149 @@ impl EdgeNeighborCounter {
     }
 }
 
+pub struct NaiveUnpacker<'a> {
+    graph: &'a Graph<UranNode, UranEdge>,
+    edges_by_level: Vec<Vec<EdgeId>>, // the edges sorted into buckets corresponding to the minimum
+    // level of the two nodes they connect
+    max_level: Level,
+}
+
+impl<'a> NaiveUnpacker<'a> {
+    pub fn new(graph: &'a Graph<UranNode, UranEdge>) -> Self {
+        let max_level = graph.nodes.iter().map(|n| n.level).max().unwrap();
+
+        let mut unpacker = NaiveUnpacker {
+            graph,
+            edges_by_level: vec![Vec::new(); (max_level + 1) as usize],
+            max_level,
+        };
+
+        // assign the edges to their levels
+        for edge in graph.edges.iter() {
+            let level = graph.node(edge.src).level.min(graph.node(edge.dst).level);
+            unpacker.edges_by_level[level as usize].push(edge.id);
+        }
+
+        unpacker
+    }
+}
+
+impl<'a> GraphPacker for NaiveUnpacker<'a> {
+    fn pack(&mut self) -> Vec<Lifetime> {
+        let mut lifetimes = vec![Lifetime::default(); self.graph.edges.len()];
+
+        for level in 0..=self.max_level {
+            println!("unpacking {level}");
+
+            // the unpack flag stores whether an edge needs to be unpacked
+            let mut unpack_flag = vec![false; self.graph.edges.len()];
+            // the used flag stores whether an edge is currently used
+            // This changes, when a shortcut is used instead of it's child edges.
+            // The shortcut becomes true, while the children become false
+            let mut used_flag = vec![false; self.graph.edges.len()];
+
+            let mut neighbor_counters = vec![NeighborCounter::new(); self.graph.nodes.len()];
+
+            println!("marking the edges");
+
+            // mark all edges that have to be unpacked
+            for edges_by_level in self.edges_by_level[(level as usize)..=(self.max_level as usize)].iter() {
+                for edge_id in edges_by_level.iter() {
+                    let edge = &self.graph.edges[*edge_id as usize];
+                    if edge.is_shortcut() {
+                        unpack_flag[edge.id as usize] = true;
+                    } else {
+                        used_flag[edge.id as usize] = true;
+                    }
+                }
+            }
+
+            println!("unpacking the edges");
+            // unpack the edges
+            for edges_by_level in self.edges_by_level.iter().rev() {
+                for edge_id in edges_by_level.iter() {
+                    let unpack = unpack_flag[*edge_id as usize];
+                    if unpack == false {
+                        continue;
+                    }
+
+                    let edge = &self.graph.edges[*edge_id as usize];
+                    if edge.is_shortcut() {
+                        unpack_flag[edge.bridge_a as usize] = true;
+                        unpack_flag[edge.bridge_b as usize] = true;
+                    } else {
+                        used_flag[*edge_id as usize] = true;
+                        neighbor_counters[edge.src as usize].add(edge.dst);
+                        neighbor_counters[edge.dst as usize].add(edge.src);
+                    }
+                }
+            }
+
+            println!("repacking the edges");
+            // repack the edges
+            for edges_by_level in self.edges_by_level.iter() {
+                for edge_id in edges_by_level.iter() {
+                    let edge = &self.graph.edges[*edge_id as usize];
+
+                    if !edge.is_shortcut() {
+                        continue;
+                    }
+
+                    let bridge_a = edge.bridge_a as usize;
+                    let bridge_b = edge.bridge_b as usize;
+
+                    // one of the child edges is not used, so we can't insert
+                    // this shortcut
+                    if !(used_flag[bridge_b] && used_flag[bridge_a]) {
+                        continue;
+                    }
+
+                    let contracted_node = self.graph.edges[bridge_a].dst as usize;
+
+                    if neighbor_counters[contracted_node].count <= 2 {
+                        used_flag[*edge_id as usize] = true;
+                        used_flag[bridge_a] = false;
+                        used_flag[bridge_b] = false;
+                    }
+                }
+            }
+
+            println!("saving the lifetimes");
+            // save the liftimes
+            for (index, used) in used_flag.iter().enumerate() {
+                if !used {
+                    continue;
+                };
+
+                let mut lifetime = &mut lifetimes[index];
+
+                lifetime.start = lifetime.start.min(level);
+                lifetime.end = level;
+            }
+        }
+
+        return lifetimes;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_lifetimes() {
+        let lifetime = Lifetime { start: 1, end: 5 };
+        assert!(lifetime.lives_at(1));
+        assert!(!lifetime.lives_at(0));
+        assert!(lifetime.lives_at(4));
+        assert!(!lifetime.lives_at(5));
+
+        let lifetime = Lifetime { start: 0, end: 179 };
+        assert!(lifetime.lives_at(0));
+        assert!(!lifetime.lives_at(200));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
