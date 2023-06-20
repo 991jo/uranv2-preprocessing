@@ -20,9 +20,6 @@ impl<'a> NaiveQuery<'a> {
         // collect the edges
         for edge in self.graph.edges.iter() {
             if self.lifetimes[edge.id as usize].lives_at(level) {
-                println!("working on edge {:?}", edge);
-                println!("Lifetime: {:?}", self.lifetimes[edge.id as usize]);
-                println!("adding edge!");
                 response.edges.push(edge.clone());
             }
         }
@@ -72,10 +69,6 @@ impl QueryResponse<UranNode, UranEdge> {
         writer.write_fmt(format_args!("{}\n", self.edges.len()))?;
 
         for (index, node) in self.nodes.iter().enumerate() {
-            if index == 86 {
-                println!("Reformatting {:?} to 86", node);
-                }
-
             writer.write_fmt(format_args!(
                 "{} {}\n",
                 node.position.latitude, node.position.longitude
