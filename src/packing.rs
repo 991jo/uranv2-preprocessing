@@ -187,7 +187,13 @@ impl<'a> IterativeUnpacker<'a> {
     pub fn repack(&mut self) -> Vec<Lifetime> {
         // dbg!(self.unpack_offsets.clone());
         // dbg!(self.unpacked_edges.clone());
-        let mut lifetimes = vec![Lifetime{start: u16::MAX, end: u16::MIN}; self.graph.edges.len()];
+        let mut lifetimes = vec![
+            Lifetime {
+                start: u16::MAX,
+                end: u16::MIN
+            };
+            self.graph.edges.len()
+        ];
 
         let mut edge_used = vec![false; self.graph.edges.len()];
 
