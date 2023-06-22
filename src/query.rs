@@ -68,7 +68,7 @@ impl QueryResponse<UranNode, UranEdge> {
         writer.write_fmt(format_args!("{}\n", self.nodes.len()))?;
         writer.write_fmt(format_args!("{}\n", self.edges.len()))?;
 
-        for (index, node) in self.nodes.iter().enumerate() {
+        for (_index, node) in self.nodes.iter().enumerate() {
             writer.write_fmt(format_args!(
                 "{} {}\n",
                 node.position.latitude, node.position.longitude

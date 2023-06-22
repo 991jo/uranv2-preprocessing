@@ -195,8 +195,6 @@ impl<'a> IterativeUnpacker<'a> {
             self.graph.edges.len()
         ];
 
-        let mut edge_used = vec![false; self.graph.edges.len()];
-
         // calculate the node that was contracted to create a shortcut.
         let mut contracted_node = vec![NodeId::MAX; self.graph.edges.len()];
         for edge in self.graph.edges.iter() {
@@ -207,15 +205,16 @@ impl<'a> IterativeUnpacker<'a> {
 
         for level in (0..=self.max_level).rev() {
             println!("working on level {level}");
-            let mut neighbor_counter = vec![EdgeNeighborCounter::new(); self.graph.nodes.len()];
+            let mut edge_used = vec![false; self.graph.edges.len()];
+            let mut neighbor_counter = vec![NeighborCounter::new(); self.graph.nodes.len()];
             let level_offset = self.unpack_offsets[level as usize];
             let used_edges = &self.unpacked_edges[..level_offset];
             // dbg!(used_edges);
             for edge_idx in used_edges.iter() {
                 let edge = &self.graph.edges[*edge_idx as usize];
 
-                neighbor_counter[edge.src as usize].add(*edge_idx, edge.dst);
-                neighbor_counter[edge.dst as usize].add(*edge_idx, edge.src);
+                neighbor_counter[edge.src as usize].add(edge.dst);
+                neighbor_counter[edge.dst as usize].add(edge.src);
                 edge_used[*edge_idx as usize] = true;
             }
 
@@ -235,7 +234,7 @@ impl<'a> IterativeUnpacker<'a> {
 
                     let node = contracted_node[edge.id as usize];
 
-                    let neighbors = neighbor_counter[node as usize].count();
+                    let neighbors = neighbor_counter[node as usize].count;
 
                     if neighbors >= 3 {
                         continue;
@@ -245,17 +244,9 @@ impl<'a> IterativeUnpacker<'a> {
                     // remove the old edges
                     edge_used[edge.bridge_a as usize] = false;
                     edge_used[edge.bridge_b as usize] = false;
-                    // println!("removing {} and {}", edge.bridge_a, edge.bridge_b);
-
-                    neighbor_counter[edge.src as usize].del(edge.bridge_a);
-                    neighbor_counter[edge.dst as usize].del(edge.bridge_b);
-                    neighbor_counter[node as usize].del(edge.bridge_a);
-                    neighbor_counter[node as usize].del(edge.bridge_b);
 
                     // add the new edge
                     edge_used[edge.id as usize] = true;
-                    neighbor_counter[edge.src as usize].add(edge.id, edge.dst);
-                    neighbor_counter[edge.dst as usize].add(edge.id, edge.src);
                 }
             }
 
@@ -263,7 +254,6 @@ impl<'a> IterativeUnpacker<'a> {
                 if !used {
                     continue;
                 }
-
                 let lifetime = &mut lifetimes[index as usize];
 
                 lifetime.start = lifetime.start.min(level);
@@ -498,7 +488,9 @@ impl<'a> GraphPacker for NaiveUnpacker<'a> {
             println!("marking the edges");
 
             // mark all edges that have to be unpacked
-            for edges_by_level in self.edges_by_level[(level as usize)..=(self.max_level as usize)].iter() {
+            for edges_by_level in
+                self.edges_by_level[(level as usize)..=(self.max_level as usize)].iter()
+            {
                 for edge_id in edges_by_level.iter() {
                     let edge = &self.graph.edges[*edge_id as usize];
                     if edge.is_shortcut() {
@@ -524,10 +516,15 @@ impl<'a> GraphPacker for NaiveUnpacker<'a> {
                         unpack_flag[edge.bridge_b as usize] = true;
                     } else {
                         used_flag[*edge_id as usize] = true;
-                        neighbor_counters[edge.src as usize].add(edge.dst);
-                        neighbor_counters[edge.dst as usize].add(edge.src);
                     }
                 }
+            }
+
+            // count the neighbors
+            for (index, _used) in used_flag.iter().enumerate().filter(|d| *d.1) {
+                let edge = &self.graph.edges[index];
+                neighbor_counters[edge.src as usize].add(edge.dst);
+                neighbor_counters[edge.dst as usize].add(edge.src);
             }
 
             println!("repacking the edges");
@@ -569,7 +566,7 @@ impl<'a> GraphPacker for NaiveUnpacker<'a> {
                 let mut lifetime = &mut lifetimes[index];
 
                 lifetime.start = lifetime.start.min(level);
-                lifetime.end = level;
+                lifetime.end = level + 1;
             }
         }
 
