@@ -574,21 +574,186 @@ impl<'a> GraphPacker for NaiveUnpacker<'a> {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+pub struct EfficientUnpacker<'a> {
+    graph: &'a Graph<UranNode, UranEdge>,
+    edges_by_level: Vec<Vec<EdgeId>>, // the edges sorted into buckets corresponding to the minimum
+    // level of the two nodes they connect
+    max_level: Level,
+    unpack_offsets: Vec<usize>,
+    three_neighbor_level: Vec<Level>, // contains the level at which a node gets it's
+    // third neighbor
+    neighbor_counter: Vec<NeighborCounter>,
+    lifetimes: Vec<Lifetime>, // the lifetimes of the edges
+    unpacked_edges: Vec<bool>,
+}
 
-    #[test]
-    fn test_lifetimes() {
-        let lifetime = Lifetime { start: 1, end: 5 };
-        assert!(lifetime.lives_at(1));
-        assert!(!lifetime.lives_at(0));
-        assert!(lifetime.lives_at(4));
-        assert!(!lifetime.lives_at(5));
+impl<'a> EfficientUnpacker<'a> {
+    pub fn new(graph: &'a Graph<UranNode, UranEdge>) -> EfficientUnpacker<'a> {
+        let max_level = graph.nodes.iter().map(|n| n.level).max().unwrap();
 
-        let lifetime = Lifetime { start: 0, end: 179 };
-        assert!(lifetime.lives_at(0));
-        assert!(!lifetime.lives_at(200));
+        let mut unpacker = EfficientUnpacker {
+            graph,
+            max_level,
+            edges_by_level: vec![Vec::new(); (max_level + 1) as usize],
+            three_neighbor_level: vec![Level::MIN; graph.nodes.len()],
+            lifetimes: vec![Lifetime::default(); graph.edges.len()],
+            unpacked_edges: vec![false; graph.edges.len()],
+            unpack_offsets: vec![0; (max_level + 1) as usize],
+            neighbor_counter: vec![NeighborCounter::new(); graph.nodes.len()],
+        };
+        // assign the edges to their levels
+        for edge in graph.edges.iter() {
+            let level = graph.node(edge.src).level.min(graph.node(edge.dst).level);
+            unpacker.edges_by_level[level as usize].push(edge.id);
+        }
+
+        unpacker
+    }
+
+    fn unpack_edge(
+        edge: &'a UranEdge,
+        level: Level,
+        lifetimes: &mut Vec<Lifetime>,
+        graph: &'a Graph<UranNode, UranEdge>,
+        unpacked_edges: &mut Vec<bool>,
+        three_neighbor_level: &mut Vec<Level>,
+        neighbor_counter: &mut Vec<NeighborCounter>,
+    ) {
+        // early return for all edges that we already worked on
+        if unpacked_edges[edge.id as usize] {
+            return;
+        };
+
+        // set the start of the lifetime at first introduction
+        lifetimes[edge.id as usize].end = level + 1;
+
+        if edge.is_shortcut() {
+            // the edge is a shortcut
+            let bridge_a = graph.edge(edge.bridge_a);
+            let bridge_b = graph.edge(edge.bridge_b);
+
+            Self::unpack_edge(
+                bridge_a,
+                level,
+                lifetimes,
+                graph,
+                unpacked_edges,
+                three_neighbor_level,
+                neighbor_counter,
+            );
+            Self::unpack_edge(
+                bridge_b,
+                level,
+                lifetimes,
+                graph,
+                unpacked_edges,
+                three_neighbor_level,
+                neighbor_counter,
+            );
+        } else {
+            // the edge is not a shortcut
+            let src = edge.src;
+            let dst = edge.dst;
+            if neighbor_counter[src as usize].add(dst) {
+                three_neighbor_level[src as usize] = level + 1;
+            }
+            if neighbor_counter[dst as usize].add(src) {
+                three_neighbor_level[dst as usize] = level + 1;
+            }
+        }
+        unpacked_edges[edge.id as usize] = true;
+    }
+
+    fn calculate_edge_lifetime(
+        edge: &UranEdge,
+        graph: &'a Graph<UranNode, UranEdge>,
+        lifetimes: &mut Vec<Lifetime>,
+        three_neighbor_level: &Vec<Level>,
+    ) -> Level {
+        // early return for edges that already have been done
+        if lifetimes[edge.id as usize].start != Level::MAX {
+            return lifetimes[edge.id as usize].start;
+        };
+
+        // default value for all original edges
+        let mut lifetime_start: Level = 0;
+
+        if edge.is_shortcut() {
+            let bridge_a = graph.edge(edge.bridge_a);
+            let bridge_b = graph.edge(edge.bridge_b);
+
+            let contracted_node_id = bridge_a.dst;
+            let node_lifetime = three_neighbor_level[contracted_node_id as usize];
+
+            let lifetime_a =
+                Self::calculate_edge_lifetime(bridge_a, graph, lifetimes, three_neighbor_level);
+            let lifetime_b =
+                Self::calculate_edge_lifetime(bridge_b, graph, lifetimes, three_neighbor_level);
+
+            lifetime_start = node_lifetime.max(lifetime_a.max(lifetime_b));
+        }
+
+        lifetimes[edge.id as usize].start = lifetime_start;
+        return lifetime_start;
+    }
+}
+
+impl<'a> GraphPacker for EfficientUnpacker<'a> {
+    fn pack(&mut self) -> Vec<Lifetime> {
+        // first stage
+        // - track introduction of the edges (highest possible lifetime)
+        // - track the neighbor-counter (for the start of the lifetime of the edges)
+        for level in (0..=self.max_level).rev() {
+            for edge_id in self.edges_by_level[level as usize].iter() {
+                let edge = self.graph.edge(*edge_id);
+                Self::unpack_edge(
+                    edge,
+                    level,
+                    &mut self.lifetimes,
+                    self.graph,
+                    &mut self.unpacked_edges,
+                    &mut self.three_neighbor_level,
+                    &mut self.neighbor_counter,
+                );
+            }
+        }
+
+        // second stage
+        // calculate start of the lifetime recursively
+        // min(node, bridge_a, bridge_b)
+        for level in (0..=self.max_level).rev() {
+            for edge_id in self.edges_by_level[level as usize].iter() {
+                let edge = self.graph.edge(*edge_id);
+                Self::calculate_edge_lifetime(
+                    edge,
+                    self.graph,
+                    &mut self.lifetimes,
+                    &self.three_neighbor_level,
+                );
+            }
+        }
+
+        // third stage
+        // calculate the end of the lifetimes due to the lifetimes of higher
+        // level shortcuts recursively
+        for level in (0..=self.max_level).rev() {
+            for edge_id in self.edges_by_level[level as usize].iter() {
+                let edge = self.graph.edge(*edge_id);
+                let lifetime_start = self.lifetimes[*edge_id as usize].start;
+
+                if edge.is_shortcut() {
+                    let bridge_a = self.graph.edge(edge.bridge_a);
+                    let bridge_b = self.graph.edge(edge.bridge_b);
+
+                    self.lifetimes[bridge_a.id as usize].end =
+                        self.lifetimes[bridge_a.id as usize].end.min(lifetime_start);
+                    self.lifetimes[bridge_b.id as usize].end =
+                        self.lifetimes[bridge_b.id as usize].end.min(lifetime_start);
+                }
+            }
+        }
+
+        self.lifetimes.clone()
     }
 }
 

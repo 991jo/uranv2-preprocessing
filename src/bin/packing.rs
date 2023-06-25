@@ -1,7 +1,7 @@
 use clap::{Parser, ValueEnum};
 use std::path::PathBuf;
 use std::time::Instant;
-use uranv2::packing::{save_lifetimes, GraphPacker, IterativeUnpacker, NaiveUnpacker};
+use uranv2::packing::{save_lifetimes, GraphPacker, IterativeUnpacker, NaiveUnpacker, EfficientUnpacker};
 use uranv2::utils::load_graph;
 
 #[derive(Parser, Debug)]
@@ -20,6 +20,7 @@ struct Arguments {
 enum Packer {
     Iterative,
     Naive,
+    Efficient
 }
 
 pub fn main() {
@@ -38,6 +39,7 @@ pub fn main() {
     let mut packer: Box<dyn GraphPacker> = match args.packer {
         Packer::Iterative => Box::new(IterativeUnpacker::new(&graph)),
         Packer::Naive => Box::new(NaiveUnpacker::new(&graph)),
+        Packer::Efficient => Box::new(EfficientUnpacker::new(&graph)),
     };
 
     let lifetimes = packer.pack();
