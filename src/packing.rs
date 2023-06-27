@@ -4,6 +4,28 @@ use std::fs;
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::Path;
 
+/// Defines a function that determines whether or not an edge may be repacked
+/// or not depending on aesthetic criteria.
+pub type AestheticFunction = fn(EdgeId, &Graph<UranNode, UranEdge>, level: Level) -> bool;
+
+
+/// An aesthetic function that simply allows repacking all edges.
+pub fn accept_all(_edge_id: EdgeId, _graph: &Graph<UranNode, UranEdge>, _level: Level) -> bool {
+    return true
+}
+
+/// allows only edges with a certain length
+pub fn maximum_length_500(edge_id: EdgeId, graph: &Graph<UranNode, UranEdge>, _level: Level) -> bool {
+    let edge = graph.edge(edge_id);
+    !edge.is_shortcut() || edge.cost < 500
+}
+
+/// allows only edges with a certain length
+pub fn maximum_length_50_level(edge_id: EdgeId, graph: &Graph<UranNode, UranEdge>, level: Level) -> bool {
+    let edge = graph.edge(edge_id);
+    !edge.is_shortcut() || edge.cost < 50 * (level as u32)
+}
+
 /// The lifetime of an edge.
 /// An edge lives at a point t, when start <= t < end.
 /// Therefore a lifetime from x to x is empty.
@@ -32,7 +54,7 @@ impl Lifetime {
 }
 
 pub trait GraphPacker {
-    fn pack(&mut self) -> Vec<Lifetime>;
+    fn pack(&mut self, aesthetic: AestheticFunction) -> Vec<Lifetime>;
 }
 
 pub fn save_lifetimes(lifetimes: &Vec<Lifetime>, filename: &Path) -> Result<(), std::io::Error> {
@@ -184,7 +206,7 @@ impl<'a> IterativeUnpacker<'a> {
         }
     }
 
-    pub fn repack(&mut self) -> Vec<Lifetime> {
+    pub fn repack(&mut self, aesthetic: AestheticFunction) -> Vec<Lifetime> {
         // dbg!(self.unpack_offsets.clone());
         // dbg!(self.unpacked_edges.clone());
         let mut lifetimes = vec![
@@ -228,6 +250,10 @@ impl<'a> IterativeUnpacker<'a> {
                         continue;
                     }
 
+                    if !aesthetic(edge.id, self.graph, level) {
+                        continue;
+                    }
+
                     if !(edge_used[edge.bridge_a as usize] && edge_used[edge.bridge_b as usize]) {
                         continue;
                     }
@@ -267,9 +293,9 @@ impl<'a> IterativeUnpacker<'a> {
 }
 
 impl<'a> GraphPacker for IterativeUnpacker<'a> {
-    fn pack(&mut self) -> Vec<Lifetime> {
+    fn pack(&mut self, aesthetic: AestheticFunction) -> Vec<Lifetime> {
         self.unpack();
-        self.repack()
+        self.repack(aesthetic)
     }
 }
 
@@ -470,7 +496,7 @@ impl<'a> NaiveUnpacker<'a> {
 }
 
 impl<'a> GraphPacker for NaiveUnpacker<'a> {
-    fn pack(&mut self) -> Vec<Lifetime> {
+    fn pack(&mut self, aesthetic: AestheticFunction) -> Vec<Lifetime> {
         let mut lifetimes = vec![Lifetime::default(); self.graph.edges.len()];
 
         for level in 0..=self.max_level {
@@ -537,6 +563,10 @@ impl<'a> GraphPacker for NaiveUnpacker<'a> {
                         continue;
                     }
 
+                    if !aesthetic(edge.id, self.graph, level) {
+                        continue;
+                    }
+
                     let bridge_a = edge.bridge_a as usize;
                     let bridge_b = edge.bridge_b as usize;
 
@@ -585,6 +615,7 @@ pub struct EfficientUnpacker<'a> {
     lifetimes: Vec<Lifetime>, // the lifetimes of the edges
     unpacked_edges: Vec<bool>,
     unpacked_by: Vec<EdgeId>, // the ID from which the edge was first unpacked
+    aesthetic_criterium: Vec<Level> // the lowest level an edge may be used
 }
 
 impl<'a> EfficientUnpacker<'a> {
@@ -600,12 +631,21 @@ impl<'a> EfficientUnpacker<'a> {
             unpacked_edges: vec![false; graph.edges.len()],
             neighbor_counter: vec![NeighborCounter::new(); graph.nodes.len()],
             unpacked_by: vec![EdgeId::MAX; graph.edges.len()],
+            aesthetic_criterium: vec![Level::MAX; graph.edges.len()],
         };
         // assign the edges to their levels
         for edge in graph.edges.iter() {
             let level = graph.node(edge.src).level.min(graph.node(edge.dst).level);
             unpacker.edges_by_level[level as usize].push(edge.id);
         }
+
+        // set the level for the aesthetic criterium
+        for edge in graph.edges.iter() {
+            if maximum_length_500(edge.id, graph, 0) {
+                unpacker.aesthetic_criterium[edge.id as usize] = 0;
+            }
+        }
+        
 
         unpacker
     }
@@ -679,6 +719,7 @@ impl<'a> EfficientUnpacker<'a> {
         graph: &'a Graph<UranNode, UranEdge>,
         lifetimes: &mut Vec<Lifetime>,
         three_neighbor_level: &Vec<Level>,
+        aesthetic_criterium: &Vec<Level>,
     ) -> Level {
         // early return for edges that already have been done
         if lifetimes[edge.id as usize].start != Level::MAX {
@@ -696,11 +737,11 @@ impl<'a> EfficientUnpacker<'a> {
             let node_lifetime = three_neighbor_level[contracted_node_id as usize];
 
             let lifetime_a =
-                Self::calculate_edge_lifetime(bridge_a, graph, lifetimes, three_neighbor_level);
+                Self::calculate_edge_lifetime(bridge_a, graph, lifetimes, three_neighbor_level, aesthetic_criterium);
             let lifetime_b =
-                Self::calculate_edge_lifetime(bridge_b, graph, lifetimes, three_neighbor_level);
+                Self::calculate_edge_lifetime(bridge_b, graph, lifetimes, three_neighbor_level, aesthetic_criterium);
 
-            lifetime_start = node_lifetime.max(lifetime_a.max(lifetime_b));
+            lifetime_start = node_lifetime.max(lifetime_a.max(lifetime_b.max(aesthetic_criterium[edge.id as usize])));
         }
 
         lifetimes[edge.id as usize].start = lifetime_start;
@@ -709,7 +750,7 @@ impl<'a> EfficientUnpacker<'a> {
 }
 
 impl<'a> GraphPacker for EfficientUnpacker<'a> {
-    fn pack(&mut self) -> Vec<Lifetime> {
+    fn pack(&mut self, _aesthetic: AestheticFunction) -> Vec<Lifetime> {
 
         // first stage
         // - track introduction of the edges (highest possible lifetime)
@@ -741,6 +782,7 @@ impl<'a> GraphPacker for EfficientUnpacker<'a> {
                     self.graph,
                     &mut self.lifetimes,
                     &self.three_neighbor_level,
+                    &self.aesthetic_criterium
                 );
             }
         }

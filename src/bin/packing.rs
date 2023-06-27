@@ -1,7 +1,7 @@
 use clap::{Parser, ValueEnum};
 use std::path::PathBuf;
 use std::time::Instant;
-use uranv2::packing::{save_lifetimes, GraphPacker, IterativeUnpacker, NaiveUnpacker, EfficientUnpacker};
+use uranv2::packing::{save_lifetimes, GraphPacker, IterativeUnpacker, NaiveUnpacker, EfficientUnpacker, accept_all, maximum_length_500, maximum_length_50_level};
 use uranv2::utils::load_graph;
 
 #[derive(Parser, Debug)]
@@ -42,7 +42,7 @@ pub fn main() {
         Packer::Efficient => Box::new(EfficientUnpacker::new(&graph)),
     };
 
-    let lifetimes = packer.pack();
+    let lifetimes = packer.pack(maximum_length_50_level);
 
     let delta = timer.elapsed().as_secs_f32();
     println!("It took {} seconds to pack the graph.", delta);
