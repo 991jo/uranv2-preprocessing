@@ -7,7 +7,7 @@ use std::path::Path;
 /// The lifetime of an edge.
 /// An edge lives at a point t, when start <= t < end.
 /// Therefore a lifetime from x to x is empty.
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub struct Lifetime {
     pub start: Level,
     pub end: Level,
@@ -579,12 +579,12 @@ pub struct EfficientUnpacker<'a> {
     edges_by_level: Vec<Vec<EdgeId>>, // the edges sorted into buckets corresponding to the minimum
     // level of the two nodes they connect
     max_level: Level,
-    unpack_offsets: Vec<usize>,
-    three_neighbor_level: Vec<Level>, // contains the level at which a node gets it's
-    // third neighbor
+    three_neighbor_level: Vec<Level>, // contains the lowest level at which this node has at most
+    // 2 neighbors
     neighbor_counter: Vec<NeighborCounter>,
     lifetimes: Vec<Lifetime>, // the lifetimes of the edges
     unpacked_edges: Vec<bool>,
+    unpacked_by: Vec<EdgeId>, // the ID from which the edge was first unpacked
 }
 
 impl<'a> EfficientUnpacker<'a> {
@@ -598,8 +598,8 @@ impl<'a> EfficientUnpacker<'a> {
             three_neighbor_level: vec![Level::MIN; graph.nodes.len()],
             lifetimes: vec![Lifetime::default(); graph.edges.len()],
             unpacked_edges: vec![false; graph.edges.len()],
-            unpack_offsets: vec![0; (max_level + 1) as usize],
             neighbor_counter: vec![NeighborCounter::new(); graph.nodes.len()],
+            unpacked_by: vec![EdgeId::MAX; graph.edges.len()],
         };
         // assign the edges to their levels
         for edge in graph.edges.iter() {
@@ -618,19 +618,28 @@ impl<'a> EfficientUnpacker<'a> {
         unpacked_edges: &mut Vec<bool>,
         three_neighbor_level: &mut Vec<Level>,
         neighbor_counter: &mut Vec<NeighborCounter>,
+        unpacked_by: &mut Vec<EdgeId>,
     ) {
         // early return for all edges that we already worked on
         if unpacked_edges[edge.id as usize] {
             return;
         };
+        unpacked_edges[edge.id as usize] = true;
 
-        // set the start of the lifetime at first introduction
+        // set the end of the lifetime at first introduction
+        // +1 because end is non-inclusive
         lifetimes[edge.id as usize].end = level + 1;
 
         if edge.is_shortcut() {
             // the edge is a shortcut
             let bridge_a = graph.edge(edge.bridge_a);
             let bridge_b = graph.edge(edge.bridge_b);
+            if unpacked_by[bridge_a.id as usize] == EdgeId::MAX {
+                unpacked_by[bridge_a.id as usize] = edge.id;
+            }
+            if unpacked_by[bridge_b.id as usize] == EdgeId::MAX {
+                unpacked_by[bridge_b.id as usize] = edge.id;
+            }
 
             Self::unpack_edge(
                 bridge_a,
@@ -640,6 +649,7 @@ impl<'a> EfficientUnpacker<'a> {
                 unpacked_edges,
                 three_neighbor_level,
                 neighbor_counter,
+                unpacked_by,
             );
             Self::unpack_edge(
                 bridge_b,
@@ -649,6 +659,7 @@ impl<'a> EfficientUnpacker<'a> {
                 unpacked_edges,
                 three_neighbor_level,
                 neighbor_counter,
+                unpacked_by,
             );
         } else {
             // the edge is not a shortcut
@@ -661,7 +672,6 @@ impl<'a> EfficientUnpacker<'a> {
                 three_neighbor_level[dst as usize] = level + 1;
             }
         }
-        unpacked_edges[edge.id as usize] = true;
     }
 
     fn calculate_edge_lifetime(
@@ -700,6 +710,7 @@ impl<'a> EfficientUnpacker<'a> {
 
 impl<'a> GraphPacker for EfficientUnpacker<'a> {
     fn pack(&mut self) -> Vec<Lifetime> {
+
         // first stage
         // - track introduction of the edges (highest possible lifetime)
         // - track the neighbor-counter (for the start of the lifetime of the edges)
@@ -714,13 +725,14 @@ impl<'a> GraphPacker for EfficientUnpacker<'a> {
                     &mut self.unpacked_edges,
                     &mut self.three_neighbor_level,
                     &mut self.neighbor_counter,
+                    &mut self.unpacked_by,
                 );
             }
         }
 
         // second stage
         // calculate start of the lifetime recursively
-        // min(node, bridge_a, bridge_b)
+        // max(node, bridge_a, bridge_b)
         for level in (0..=self.max_level).rev() {
             for edge_id in self.edges_by_level[level as usize].iter() {
                 let edge = self.graph.edge(*edge_id);
@@ -745,10 +757,14 @@ impl<'a> GraphPacker for EfficientUnpacker<'a> {
                     let bridge_a = self.graph.edge(edge.bridge_a);
                     let bridge_b = self.graph.edge(edge.bridge_b);
 
-                    self.lifetimes[bridge_a.id as usize].end =
-                        self.lifetimes[bridge_a.id as usize].end.min(lifetime_start);
-                    self.lifetimes[bridge_b.id as usize].end =
-                        self.lifetimes[bridge_b.id as usize].end.min(lifetime_start);
+                    if self.unpacked_by[bridge_a.id as usize] == edge.id {
+                        self.lifetimes[bridge_a.id as usize].end =
+                            self.lifetimes[bridge_a.id as usize].end.min(lifetime_start);
+                    }
+                    if self.unpacked_by[bridge_b.id as usize] == edge.id {
+                        self.lifetimes[bridge_b.id as usize].end =
+                            self.lifetimes[bridge_b.id as usize].end.min(lifetime_start);
+                    }
                 }
             }
         }
