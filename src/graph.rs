@@ -18,6 +18,8 @@ pub trait EdgeTrait {
     fn dst(&self) -> NodeId;
     fn id(&self) -> EdgeId;
     fn set_id(&mut self, edge: EdgeId);
+    fn set_src(&mut self, edge: NodeId);
+    fn set_dst(&mut self, edge: NodeId);
     fn from_line(line: &str) -> Result<Self, GraphParsingError> where Self: Sized;
 }
 
@@ -277,6 +279,14 @@ impl EdgeTrait for UranEdge {
 
     fn src(&self) -> NodeId {
         self.src
+    }
+
+    fn set_src(&mut self, src: NodeId) {
+        self.src = src
+    }
+
+    fn set_dst(&mut self, dst: NodeId) {
+        self.dst = dst
     }
 
     fn dst(&self) -> NodeId {

@@ -1,4 +1,4 @@
-use crate::graph::{EdgeId, Graph, Level, NodeId, UranEdge, UranNode};
+use crate::graph::{EdgeId, EdgeTrait, Graph, Level, NodeId, UranEdge, UranNode, Position};
 use smallvec::SmallVec;
 use std::fs;
 use std::io::{BufRead, BufReader, BufWriter, Write};
@@ -8,22 +8,70 @@ use std::path::Path;
 /// or not depending on aesthetic criteria.
 pub type AestheticFunction = fn(EdgeId, &Graph<UranNode, UranEdge>, level: Level) -> bool;
 
-
 /// An aesthetic function that simply allows repacking all edges.
 pub fn accept_all(_edge_id: EdgeId, _graph: &Graph<UranNode, UranEdge>, _level: Level) -> bool {
-    return true
+    return true;
+}
+
+/// An aesthetic function that does not allow repacking any edges.
+/// This results in the graph being completly unpacked at every level.
+pub fn accept_none(_edge_id: EdgeId, _graph: &Graph<UranNode, UranEdge>, _level: Level) -> bool {
+    return false;
 }
 
 /// allows only edges with a certain length
-pub fn maximum_length_500(edge_id: EdgeId, graph: &Graph<UranNode, UranEdge>, _level: Level) -> bool {
+pub fn maximum_length_500(
+    edge_id: EdgeId,
+    graph: &Graph<UranNode, UranEdge>,
+    _level: Level,
+) -> bool {
     let edge = graph.edge(edge_id);
     !edge.is_shortcut() || edge.cost < 500
 }
 
 /// allows only edges with a certain length
-pub fn maximum_length_50_level(edge_id: EdgeId, graph: &Graph<UranNode, UranEdge>, level: Level) -> bool {
+pub fn maximum_length_50_level(
+    edge_id: EdgeId,
+    graph: &Graph<UranNode, UranEdge>,
+    level: Level,
+) -> bool {
     let edge = graph.edge(edge_id);
     !edge.is_shortcut() || edge.cost < 50 * (level as u32)
+}
+
+pub fn edge_length(start: &Position, end: &Position) -> f32 {
+    ((start.latitude - end.latitude).powi(2)
+        + (start.longitude - end.longitude).powi(2)).sqrt()
+}
+
+
+/// calculates the distance between a line given by a start and end Position
+/// and a point.
+pub fn distance_line_point(start: &Position, end: &Position, point: &Position) -> f32 {
+
+    let edge_length = edge_length(start, end);
+
+    let upper = ((end.latitude - start.latitude)*(start.longitude - point.longitude) - (start.latitude - point.latitude)*(end.longitude - start.longitude)).abs();
+
+    upper/edge_length
+}
+
+pub fn maximum_error(edge_id: EdgeId, graph: &Graph<UranNode, UranEdge>, level: Level) -> bool {
+    let edge = graph.edge(edge_id);
+
+    if !edge.is_shortcut() {
+        return true;
+    }
+
+    let start = &graph.node(edge.src()).position;
+    let end = &graph.node(edge.dst()).position;
+    let contracted = &graph.node(graph.edge(edge.bridge_a).dst()).position;
+
+    let edge_length = edge_length(start, end);
+
+    let distance = distance_line_point(start, end, contracted);
+
+    (distance / edge_length) < 0.005
 }
 
 /// The lifetime of an edge.
@@ -615,7 +663,7 @@ pub struct EfficientUnpacker<'a> {
     lifetimes: Vec<Lifetime>, // the lifetimes of the edges
     unpacked_edges: Vec<bool>,
     unpacked_by: Vec<EdgeId>, // the ID from which the edge was first unpacked
-    aesthetic_criterium: Vec<Level> // the lowest level an edge may be used
+    aesthetic_criterium: Vec<Level>, // the lowest level an edge may be used
 }
 
 impl<'a> EfficientUnpacker<'a> {
@@ -641,11 +689,10 @@ impl<'a> EfficientUnpacker<'a> {
 
         // set the level for the aesthetic criterium
         for edge in graph.edges.iter() {
-            if maximum_length_500(edge.id, graph, 0) {
+            if maximum_error(edge.id, graph, 0) {
                 unpacker.aesthetic_criterium[edge.id as usize] = 0;
             }
         }
-        
 
         unpacker
     }
@@ -736,12 +783,23 @@ impl<'a> EfficientUnpacker<'a> {
             let contracted_node_id = bridge_a.dst;
             let node_lifetime = three_neighbor_level[contracted_node_id as usize];
 
-            let lifetime_a =
-                Self::calculate_edge_lifetime(bridge_a, graph, lifetimes, three_neighbor_level, aesthetic_criterium);
-            let lifetime_b =
-                Self::calculate_edge_lifetime(bridge_b, graph, lifetimes, three_neighbor_level, aesthetic_criterium);
+            let lifetime_a = Self::calculate_edge_lifetime(
+                bridge_a,
+                graph,
+                lifetimes,
+                three_neighbor_level,
+                aesthetic_criterium,
+            );
+            let lifetime_b = Self::calculate_edge_lifetime(
+                bridge_b,
+                graph,
+                lifetimes,
+                three_neighbor_level,
+                aesthetic_criterium,
+            );
 
-            lifetime_start = node_lifetime.max(lifetime_a.max(lifetime_b.max(aesthetic_criterium[edge.id as usize])));
+            lifetime_start = node_lifetime
+                .max(lifetime_a.max(lifetime_b.max(aesthetic_criterium[edge.id as usize])));
         }
 
         lifetimes[edge.id as usize].start = lifetime_start;
@@ -751,7 +809,6 @@ impl<'a> EfficientUnpacker<'a> {
 
 impl<'a> GraphPacker for EfficientUnpacker<'a> {
     fn pack(&mut self, _aesthetic: AestheticFunction) -> Vec<Lifetime> {
-
         // first stage
         // - track introduction of the edges (highest possible lifetime)
         // - track the neighbor-counter (for the start of the lifetime of the edges)
@@ -782,7 +839,7 @@ impl<'a> GraphPacker for EfficientUnpacker<'a> {
                     self.graph,
                     &mut self.lifetimes,
                     &self.three_neighbor_level,
-                    &self.aesthetic_criterium
+                    &self.aesthetic_criterium,
                 );
             }
         }
@@ -830,5 +887,16 @@ mod tests {
         let lifetime = Lifetime { start: 0, end: 179 };
         assert!(lifetime.lives_at(0));
         assert!(!lifetime.lives_at(200));
+    }
+
+    #[test]
+    fn test_distance() {
+
+        let start = Position{latitude: 1.0, longitude: 2.0};
+        let end = Position{latitude: 3.0, longitude: 2.0};
+        let point = Position{latitude: 2.0, longitude: 4.0};
+
+        assert!((distance_line_point(&start, &end, &point) - 2.0).abs() <= 10e-5);
+
     }
 }

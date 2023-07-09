@@ -9,8 +9,8 @@ pub struct NaiveQuery<'a> {
 }
 
 pub struct QueryResponse<N: NodeTrait, E: EdgeTrait> {
-    nodes: Vec<N>,
-    edges: Vec<E>,
+    pub nodes: Vec<N>,
+    pub edges: Vec<E>,
 }
 
 impl<'a> NaiveQuery<'a> {
@@ -52,12 +52,43 @@ impl<'a> NaiveQuery<'a> {
     }
 }
 
-impl<N: NodeTrait, E: EdgeTrait> QueryResponse<N, E> {
+impl<N: NodeTrait + Clone, E: EdgeTrait> QueryResponse<N, E> {
     pub fn new() -> QueryResponse<N, E> {
         QueryResponse {
             nodes: Vec::new(),
             edges: Vec::new(),
         }
+    }
+
+    /// This function assumes, that the edges have been set, 
+    /// but the nodes are empty.
+    /// It gathers all the requiered nodes from the graph and renumbers
+    /// everything properly so that the QueryResponse object is complete
+    pub fn build_response(&mut self, graph: &Graph<N, E>){
+        // mark all used nodes
+        let mut used_nodes = vec![false; graph.nodes.len()];
+
+        for edge in self.edges.iter() {
+            used_nodes[edge.src() as usize] = true;
+            used_nodes[edge.dst() as usize] = true;
+        }
+
+        // gather the edges
+        let mut id_map: Vec<NodeId> = vec![NodeId::MAX; graph.nodes.len()];
+        for (index, value) in used_nodes.iter().enumerate() {
+            if *value {
+                id_map[index] = self.nodes.len() as NodeId;
+                self.nodes.push(graph.nodes[index].clone());
+            }
+        }
+
+        // renumber the src and destination id's to the new positions of the
+        // nodes
+        for edge in self.edges.iter_mut() {
+            edge.set_src(id_map[edge.src() as usize]);
+            edge.set_dst(id_map[edge.dst() as usize]);
+        }
+
     }
 }
 impl QueryResponse<UranNode, UranEdge> {
