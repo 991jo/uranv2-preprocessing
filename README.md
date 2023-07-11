@@ -12,6 +12,10 @@ needed.
 To build the code simply run `cargo build --release`.
 The binaries can then be found in `target/release`.
 
+The main branch does not support an aesthetic criterion.
+This feature is in the [aesthetics branch](https://github.com/991jo/uranv2-preprocessing/tree/aesthetics)
+
+
 ## Packing/Unpacking
 
 Use the `packing` binary to pack/unpack the graph.
